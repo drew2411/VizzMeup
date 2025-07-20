@@ -1,0 +1,13 @@
+pinecone
+langchain
+langchain-chroma
+langchain-groq
+langchain-openai
+langchain_community
+transformers
+langgraph
+pydantic
+langgraph-cli[inmem]
+pandas
+numpy
+plotly
