@@ -6,3 +6,4 @@ venv/
 chroma_db/
 dataset_summaries.json
 visualization/
+settings.json
