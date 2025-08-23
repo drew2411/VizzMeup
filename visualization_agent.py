@@ -255,14 +255,14 @@ merged_df = pd.merge(sales_df, products_df, how='inner', on='product_id')
 
 agg_df_1 = merged_df.groupby('category')['sale_amount'].sum().reset_index()
 fig1 = px.bar(agg_df_1, x='category', y='sale_amount', title='Total Sale Amount by Category')
-fig1.write_image(os.path.join(output_dir, "visualization_1.png"))
+fig1.write_html(os.path.join(output_dir, "visualization_1.html"))
 fig1.show()
 
 sales_df['order_date'] = pd.to_datetime(sales_df['order_date'])
 agg_df_2 = sales_df.groupby('order_date')['sale_id'].count().reset_index()
 fig2 = px.line(agg_df_2, x='order_date', y='sale_id', title='Count of Sales Over Time')
 fig2.update_layout(yaxis_title='Number of Sales')
-fig2.write_image(os.path.join(output_dir, "visualization_2.png"))
+fig2.write_html(os.path.join(output_dir, "visualization_2.html"))
 fig2.show()
 """
         code_generator_prompt = f"""
@@ -314,7 +314,7 @@ Assign the columns to the x and y axes logically (e.g., categories/dates on x, n
 
 Generate a descriptive title for the chart.
 
-Save the figure as an interactive HTML file into a folder named visualization. The filename must correspond to the JSON key (e.g., visualization_1 saves to visualization/visualization_1.html).
+Save the figure as an **interactive HTML file** into a folder named visualization. The filename must correspond to the JSON key (e.g., visualization_1 saves to visualization/visualization_1.html). You **must** use fig.write_html() for this purpose.
 
 Your script must first ensure this directory exists using the os module.
 
@@ -377,5 +377,5 @@ Finally, call fig.show() to display the plot
 
 if __name__ == "__main__":
     agent = DataVisualizationAgent()
-    user_query=input("Enter query: ")
+    user_query = input("Enter query: ")
     agent.run(user_query)
