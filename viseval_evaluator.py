@@ -36,7 +36,9 @@ def configure_llm(model: str, agent: str):
 def config_agent(agent: str, model: str, config: dict):
     """Configures and returns the agent instance."""
     if agent == "langgraph_agent":
-        return LangGraphAgent(dataset_summaries_file="dataset_summaries.json")
+        # Create an LLM instance to pass to the agent
+        llm = configure_llm(model, agent) 
+        return LangGraphAgent(llm=llm, dataset_summaries_file="dataset_summaries.json")
     else:
         raise ValueError(f"Unknown agent {agent}")
 
