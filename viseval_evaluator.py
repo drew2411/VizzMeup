@@ -6,7 +6,7 @@ from pathlib import Path
 
 import dotenv
 from viseval import Dataset, Evaluator
-from langchain_openai import AzureChatOpenAI
+from langchain_openai import ChatOpenAI
 
 # Import the new LangGraph agent
 from visualization_agent import DataVisualizationAgent as LangGraphAgent
@@ -15,13 +15,15 @@ dotenv.load_dotenv()
 
 def configure_llm(model: str, agent: str):
     """Configures and returns the appropriate LLM based on model and agent type, using only OpenAI."""
+    # This function is from your original file, adapted to use the new LangGraphAgent
     if agent == "lida":
         from llmx import llm
         return llm(provider="openai", api_type="azure", model=model, models={"max_tokens": 4096, "temperature": 0.0})
     else:
         if model in ["gpt-35-turbo", "gpt-4"]:
-            return AzureChatOpenAI(
-                model_name=model,
+            # Changed from AzureChatOpenAI to ChatOpenAI
+            return ChatOpenAI(
+                model=model,
                 max_retries=999,
                 temperature=0.0,
                 request_timeout=20,
@@ -53,7 +55,7 @@ def _main():
         "--model",
         type=str,
         default="gpt-35-turbo",
-        choices=["gpt-4", "gpt-35-turbo", "codellama-7b"], # Removed "gemini-pro"
+        choices=["gpt-4", "gpt-35-turbo", "codellama-7b"], 
     )
     parser.add_argument(
         "--agent",
@@ -79,8 +81,9 @@ def _main():
         {"library": args.library},
     )
 
-    vision_model = AzureChatOpenAI(
-        model_name="gpt-4-turbo-v",
+    # vision_model should also be ChatOpenAI if not using Azure
+    vision_model = ChatOpenAI(
+        model="gpt-4-vision-preview", # Correct model for vision tasks
         max_retries=999,
         temperature=0.0,
         request_timeout=20,
