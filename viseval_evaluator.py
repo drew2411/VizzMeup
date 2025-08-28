@@ -7,7 +7,6 @@ from pathlib import Path
 import dotenv
 from viseval import Dataset, Evaluator
 from langchain_openai import AzureChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
 from llmx import TextGenerator # Assuming this is available and needed for other agents.
 
 # Import the new LangGraph agent
@@ -16,17 +15,12 @@ from langgraph_agent_repurposed import DataVisualizationAgent as LangGraphAgent
 dotenv.load_dotenv()
 
 def configure_llm(model: str, agent: str):
-    """Configures and returns the appropriate LLM based on model and agent type."""
-    # This function is from your original file, adapted to use the new LangGraphAgent
+    """Configures and returns the appropriate LLM based on model and agent type, using only OpenAI."""
     if agent == "lida":
         from llmx import llm
         return llm(provider="openai", api_type="azure", model=model, models={"max_tokens": 4096, "temperature": 0.0})
     else:
-        if model == "gemini-pro":
-            return ChatGoogleGenerativeAI(
-                model=model, temperature=0.0, convert_system_message_to_human=True
-            )
-        elif model in ["gpt-35-turbo", "gpt-4"]:
+        if model in ["gpt-35-turbo", "gpt-4"]:
             return AzureChatOpenAI(
                 model_name=model,
                 max_retries=999,
@@ -34,6 +28,7 @@ def configure_llm(model: str, agent: str):
                 request_timeout=20,
             )
         elif model == "codellama-7b":
+            # This is a local model, but we keep it since it's in your original example
             from model.langchain_llama import ChatLlama
             return ChatLlama("../llama_models/CodeLlama-7b-Instruct")
         else:
@@ -41,8 +36,6 @@ def configure_llm(model: str, agent: str):
 
 def config_agent(agent: str, model: str, config: dict):
     """Configures and returns the agent instance."""
-    # This function is also from your original file.
-    # We will instantiate your DataVisualizationAgent directly here for evaluation.
     if agent == "langgraph_agent":
         return LangGraphAgent(dataset_summaries_file="dataset_summaries.json")
     else:
@@ -59,13 +52,13 @@ def _main():
         "--model",
         type=str,
         default="gpt-35-turbo",
-        choices=["gpt-4", "gpt-35-turbo", "gemini-pro", "codellama-7b"],
+        choices=["gpt-4", "gpt-35-turbo", "codellama-7b"], # Removed "gemini-pro"
     )
     parser.add_argument(
         "--agent",
         type=str,
-        default="langgraph_agent", # Changed default to your new agent
-        choices=["langgraph_agent"], # Restrict choices to the new agent
+        default="langgraph_agent",
+        choices=["langgraph_agent"],
     )
     parser.add_argument(
         "--library", type=str, default="matplotlib", choices=["matplotlib", "seaborn"]
