@@ -1,19 +1,34 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 import os
 import json
+import time
 from datetime import datetime
-from typing import Literal, TypedDict, Any, Dict, Annotated
+from typing import Literal, TypedDict, Any, Dict, List
 import pandas as pd
+import tempfile
+import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
-from langchain_core.messages import AnyMessage, SystemMessage, HumanMessage
-from langgraph.graph import add_messages
+from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 import chromadb
+from langgraph.graph import END, START, StateGraph
+from viseval.agent import Agent, ChartExecutionResult
+from viseval.datamodel import Goal
+from lida.components import preprocess_code, get_globals_dict
 
-from langgraph.graph import END, START
-from langgraph.graph.state import StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
-
+# Utility function from the original Lida example
+def show_svg(plt, svg_name: str = None):
+    """Save a plot as a SVG string and close the plot."""
+    from io import StringIO
+    f = StringIO()
+    plt.savefig(f, format="svg")
+    if svg_name:
+        plt.savefig(f"{svg_name}.svg")
+    plt.close()
+    return f.getvalue()
 
 class State(TypedDict):
     message: str
@@ -25,27 +40,23 @@ class State(TypedDict):
     code_input: Dict[str, Any]
     code: str
 
-
-class DataVisualizationAgent:
+class DataVisualizationAgent(Agent):
     def __init__(self, dataset_summaries_file: str = "dataset_summaries.json"):
-        # Load environment variables
+        super().__init__()
         load_dotenv(dotenv_path='.env')
         os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
 
-        # Load dataset summaries
         try:
             with open(dataset_summaries_file, "r") as f:
                 self.dataset_summaries = json.load(f)
         except FileNotFoundError:
             raise FileNotFoundError(f"Dataset summaries file not found: {dataset_summaries_file}")
         
-        # Initialize LLMs
         self.transform_query_llm = ChatOpenAI(model="gpt-4.1-2025-04-14").with_structured_output(method="json_mode")
         self.planner_llm = ChatOpenAI(model="o4-mini").with_structured_output(method="json_mode")
         self.code_model = ChatOpenAI(model="o4-mini")
         self.error_model = ChatOpenAI(model="o4-mini").with_structured_output(method="json_mode")
         
-        # Build the Langgraph workflow
         self.graph_workflow = StateGraph(State)
         self.graph_workflow.add_node("refiner_extractor", self.transform_query)
         self.graph_workflow.add_node("data_context_retriever", self.get_chroma_retriever)
@@ -81,20 +92,20 @@ class DataVisualizationAgent:
 Your goal is to take a vague or general user query and rewrite it into a clear, structured analytical question that helps an agent understand what kind of visualization or service is required.
 
 Context:
-    •   The agent works on datasets described by {self.dataset_summaries["database_intent"]}, which includes the purpose, structure, and key attributes of the datasets.
-    •   The rewritten question should reflect awareness of the dataset’s content and intent.
+    •   The agent works on datasets described by {self.dataset_summaries["database_intent"]}, which includes the purpose, structure, and key attributes of the datasets.
+    •   The rewritten question should reflect awareness of the dataset’s content and intent.
 <context>
 {self.dataset_summaries}
 </context>
 Instructions:
 
 Given an input user query:
-    •   Use the dataset summary ({self.dataset_summaries["database_intent"]}) to guide how the question is rewritten.
-    •   Include relevant metrics, dimensions, or time frames if possible.
-    •   Structure your output in a way that clearly describes:
-    1.  The intent (what is being asked),
-    2.  The dataset context (what part of the data is relevant),
-    3.  The output need (e.g., a chart, trend line, grouped comparison, etc.).
+    •   Use the dataset summary ({self.dataset_summaries["database_intent"]}) to guide how the question is rewritten.
+    •   Include relevant metrics, dimensions, or time frames if possible.
+    •   Structure your output in a way that clearly describes:
+    1.  The intent (what is being asked),
+    2.  The dataset context (what part of the data is relevant),
+    3.  The output need (e.g., a chart, trend line, grouped comparison, etc.).
     <Background based on dataset_intent>
     <Rewritten Question: a clearer, data-driven query>
     in the output just give the pormpt and nothing else just the string pls
@@ -104,7 +115,7 @@ json strcutured output key refined_prompt and the key should be a string and nex
 """
         message = [SystemMessage(content=transform_query_prompt), HumanMessage(content=state["message"])]
         response = self.transform_query_llm.invoke(message)
-        return response
+        return response.content
 
     def get_chroma_retriever(self, state: State) -> State:
         """
@@ -216,7 +227,7 @@ json strcutured output key refined_prompt and the key should be a string and nex
         """
         message = [SystemMessage(content=planner_prompt)]
         result = self.planner_llm.invoke(message)
-        return {"code_input": result}
+        return {"code_input": result.content}
 
     def code_generator(self, state: State):
         """generates the code for the given specifications"""
@@ -358,9 +369,9 @@ Finally, call fig.show() to display the plot
         """
         message = [SystemMessage(content=system_prompt)]
         response = self.error_model.invoke(message)
-        return response
+        return response.content
 
-    def router(self, state: State):
+    def router(self, state: State) -> Literal["end", "correction"]:
         """Routes based on whether code execution succeeded or failed."""
         decision = state["error"]
         if decision == 0:
@@ -374,8 +385,54 @@ Finally, call fig.show() to display the plot
         for chunk in self.agent.stream(initial_state, stream_mode="updates"):
             print(chunk)
 
+    def generate(self, nl_query: str, tables: List[str], config: Dict) -> tuple[str, Dict]:
+        """
+        Method to generate code, mirroring the Lida agent's generate method.
+        This is the viseval.agent.Agent interface.
+        """
+        self.dataset_summaries["datasets"] = [{"name": os.path.basename(t)} for t in tables]
+        initial_state = {"message": nl_query, "datasets_list": tables}
+        
+        final_state = self.agent.invoke(initial_state)
+        code = final_state.get("code")
+        
+        # Load the data into a context object for the execute step
+        data_dict = {os.path.basename(t).split('.')[0]: pd.read_csv(t) for t in tables}
+        context = {"data": data_dict, "library": config.get("library")}
+        
+        return code, context
+
+    def execute(self, code: str, context: Dict, log_name: str = None) -> ChartExecutionResult:
+        """
+        Method to execute the generated code, mirroring the Lida agent's execute method.
+        This is the viseval.agent.Agent interface.
+        """
+        data = context.get("data", {})
+        library = context.get("library")
+
+        # The code generated is a full script, so we must execute it carefully
+        try:
+            temp_globals = {"pd": pd, "plt": plt, "os": os}
+            # Add dataframes to the global namespace for the script to access
+            temp_globals.update(data)
+            
+            # Matplotlib/Seaborn specific code (from the Lida example)
+            temp_globals['plt'] = plt
+            
+            # The script will be self-contained; we just need to run it
+            exec(code, temp_globals)
+
+            # Capture SVG output
+            svg_string = show_svg(plt, svg_name=log_name)
+            
+            return ChartExecutionResult(status=True, svg_string=svg_string)
+        except Exception as exception_error:
+            import traceback
+            exception_info = traceback.format_exception_only(type(exception_error), exception_error)
+            error_msg = "".join(exception_info)
+            return ChartExecutionResult(status=False, error_msg=error_msg)
 
 if __name__ == "__main__":
     agent = DataVisualizationAgent()
     user_query = input("Enter query: ")
-    agent.run(user_query)
+    agent.run(user_query)   
