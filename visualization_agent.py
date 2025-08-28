@@ -16,8 +16,6 @@ from langchain_openai import ChatOpenAI
 import chromadb
 from langgraph.graph import END, START, StateGraph
 from viseval.agent import Agent, ChartExecutionResult
-from viseval.datamodel import Goal
-from lida.components import preprocess_code, get_globals_dict
 
 # Utility function from the original Lida example
 def show_svg(plt, svg_name: str = None):
@@ -41,8 +39,9 @@ class State(TypedDict):
     code: str
 
 class DataVisualizationAgent(Agent):
-    def __init__(self, dataset_summaries_file: str = "dataset_summaries.json"):
-        super().__init__()
+    def __init__(self, llm, dataset_summaries_file: str = "dataset_summaries.json"):
+        # The key change is here: accept 'llm' and pass it to the super class.
+        super().__init__(llm) 
         load_dotenv(dotenv_path='.env')
         os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
 
@@ -52,6 +51,9 @@ class DataVisualizationAgent(Agent):
         except FileNotFoundError:
             raise FileNotFoundError(f"Dataset summaries file not found: {dataset_summaries_file}")
         
+        # You can now use the passed 'llm' object or continue with your existing LLM initialization.
+        # Since your code initializes multiple specific LLMs, you can keep that logic.
+        # The important part is satisfying the parent class's __init__ requirements.
         self.transform_query_llm = ChatOpenAI(model="gpt-4.1-2025-04-14").with_structured_output(method="json_mode")
         self.planner_llm = ChatOpenAI(model="o4-mini").with_structured_output(method="json_mode")
         self.code_model = ChatOpenAI(model="o4-mini")

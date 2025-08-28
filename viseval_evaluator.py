@@ -7,10 +7,9 @@ from pathlib import Path
 import dotenv
 from viseval import Dataset, Evaluator
 from langchain_openai import AzureChatOpenAI
-from llmx import TextGenerator # Assuming this is available and needed for other agents.
 
 # Import the new LangGraph agent
-from langgraph_agent_repurposed import DataVisualizationAgent as LangGraphAgent
+from visualization_agent import DataVisualizationAgent as LangGraphAgent
 
 dotenv.load_dotenv()
 
