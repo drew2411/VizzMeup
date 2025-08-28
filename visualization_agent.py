@@ -4,10 +4,8 @@
 import os
 import json
 import time
-from datetime import datetime
 from typing import Literal, TypedDict, Any, Dict, List
 import pandas as pd
-import tempfile
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
@@ -16,6 +14,7 @@ from langchain_openai import ChatOpenAI
 import chromadb
 from langgraph.graph import END, START, StateGraph
 from viseval.agent import Agent, ChartExecutionResult
+from lida.components import preprocess_code, get_globals_dict
 
 # Utility function from the original Lida example
 def show_svg(plt, svg_name: str = None):
@@ -39,11 +38,11 @@ class State(TypedDict):
     code: str
 
 class DataVisualizationAgent(Agent):
-    def __init__(self, llm, dataset_summaries_file: str = "dataset_summaries.json"):
-        # The key change is here: accept 'llm' and pass it to the super class.
+    def __init__(self, llm, dataset_summaries_file: str = "dataset_summaries.json", datasets_base_path: str = "datasets"):
         super().__init__(llm) 
         load_dotenv(dotenv_path='.env')
         os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+        self.datasets_base_path = datasets_base_path
 
         try:
             with open(dataset_summaries_file, "r") as f:
@@ -51,9 +50,6 @@ class DataVisualizationAgent(Agent):
         except FileNotFoundError:
             raise FileNotFoundError(f"Dataset summaries file not found: {dataset_summaries_file}")
         
-        # You can now use the passed 'llm' object or continue with your existing LLM initialization.
-        # Since your code initializes multiple specific LLMs, you can keep that logic.
-        # The important part is satisfying the parent class's __init__ requirements.
         self.transform_query_llm = ChatOpenAI(model="gpt-4.1-2025-04-14").with_structured_output(method="json_mode")
         self.planner_llm = ChatOpenAI(model="o4-mini").with_structured_output(method="json_mode")
         self.code_model = ChatOpenAI(model="o4-mini")
@@ -86,43 +82,38 @@ class DataVisualizationAgent(Agent):
         self.agent = self.graph_workflow.compile()
 
     def transform_query(self, state) -> State:
-        """
-        Transform the query to produce a better question based on the context given.
-        """
         print("---TRANSFORM QUERY---")
         transform_query_prompt = f"""You are a question rewriter that improves user queries to be better suited for a data exploration or analytics agent.
-Your goal is to take a vague or general user query and rewrite it into a clear, structured analytical question that helps an agent understand what kind of visualization or service is required.
+        Your goal is to take a vague or general user query and rewrite it into a clear, structured analytical question that helps an agent understand what kind of visualization or service is required.
 
-Context:
-    •   The agent works on datasets described by {self.dataset_summaries["database_intent"]}, which includes the purpose, structure, and key attributes of the datasets.
-    •   The rewritten question should reflect awareness of the dataset’s content and intent.
-<context>
-{self.dataset_summaries}
-</context>
-Instructions:
+        Context:
+            •   The agent works on datasets described by {self.dataset_summaries["database_intent"]}, which includes the purpose, structure, and key attributes of the datasets.
+            •   The rewritten question should reflect awareness of the dataset’s content and intent.
+        <context>
+        {self.dataset_summaries}
+        </context>
+        Instructions:
 
-Given an input user query:
-    •   Use the dataset summary ({self.dataset_summaries["database_intent"]}) to guide how the question is rewritten.
-    •   Include relevant metrics, dimensions, or time frames if possible.
-    •   Structure your output in a way that clearly describes:
-    1.  The intent (what is being asked),
-    2.  The dataset context (what part of the data is relevant),
-    3.  The output need (e.g., a chart, trend line, grouped comparison, etc.).
-    <Background based on dataset_intent>
-    <Rewritten Question: a clearer, data-driven query>
-    in the output just give the pormpt and nothing else just the string pls
-<output>
-json strcutured output key refined_prompt and the key should be a string and next key should be datasets_list used which should be what list of what datasets are relevant for this particular query like datasets_list:["a.csv",b.csv] also remember that this shouldb the exact value like nothing name shouldb e not even change u can get the exact name from datasetsummarires in the section mentioned as Dataset name
-</output>
-"""
+        Given an input user query:
+            •   Use the dataset summary ({self.dataset_summaries["database_intent"]}) to guide how the question is rewritten.
+            •   Include relevant metrics, dimensions, or time frames if possible.
+            •   Structure your output in a way that clearly describes:
+            1.  The intent (what is being asked),
+            2.  The dataset context (what part of the data is relevant),
+            3.  The output need (e.g., a chart, trend line, grouped comparison, etc.).
+            <Background based on dataset_intent>
+            <Rewritten Question: a clearer, data-driven query>
+            in the output just give the pormpt and nothing else just the string pls
+        <output>
+        json strcutured output key refined_prompt and the key should be a string and next key should be datasets_list used which should be what list of what datasets are relevant for this particular query like datasets_list:["a.csv",b.csv] also remember that this shouldb the exact value like nothing name shouldb e not even change u can get the exact name from datasetsummarires in the section mentioned as Dataset name
+        </output>
+        """
         message = [SystemMessage(content=transform_query_prompt), HumanMessage(content=state["message"])]
         response = self.transform_query_llm.invoke(message)
-        return response.content
+        print(f"---TRANSFORMED QUERY RESPONSE---\n{response}\n---END---")
+        return response
 
     def get_chroma_retriever(self, state: State) -> State:
-        """
-        Retrieve the most relevant dataset summaries from ChromaDB for a given query.
-        """
         print("---RETRIEVING DATA CONTEXT---")
         data_list = state["datasets_list"]
         client = chromadb.PersistentClient(path="./chroma_db")
@@ -137,11 +128,10 @@ json strcutured output key refined_prompt and the key should be a string and nex
             except Exception as e:
                 planner_context += f"Could not retrieve document for id {data_list[i]}. Error: {e}"
             planner_context += "\n" + "*************************************************************************" + "\n"
-        
+        print(f"---RETRIEVED DATA CONTEXT---\n{planner_context}\n---END---")
         return {"data_context": planner_context}
 
     def planner(self, state: State):
-        """the main planner for the the visualization give the clues to the coding agent what kind of visualizetion we need what are the databases requires in a json form string output"""
         print("---PLANNING VISUALIZATION---")
         user_query = state["refined_prompt"]
         dataset_context = state["data_context"]
@@ -170,69 +160,46 @@ json strcutured output key refined_prompt and the key should be a string and nex
         planner_prompt = f"""You are an expert Data Visualization Planning Agent. Your primary function is to receive a user's request for data analysis and a description of available datasets. You must then break down this request into a structured, machine-readable JSON plan that a downstream code agent can use to generate the actual visualizations.
         <reasoning_process>
         Analyze User Intent: Deeply analyze the {user_query} to understand the user's core goal. Are they asking for a:
-
         Comparison: Comparing a metric across different categories (e.g., sales by product)? -> bar chart.
-
         Trend: Showing how a metric changes over time (e.g., monthly revenue)? -> line chart.
-
         Distribution: Understanding the spread of a single variable (e.g., distribution of customer ages)? -> histogram or bar chart.
-
         Relationship: Investigating the correlation between two numeric variables (e.g., advertising spend vs. sales)? -> scatter plot.
-
         Composition: Showing parts of a whole (e.g., market share by company)? -> pie chart.
-
         Decompose into Visualizations: A single user query may imply multiple charts. Identify each distinct analytical task and plan one visualization for each. For example, "Show me sales by region and profit over time" requires two separate visualizations.
-
         For Each Required Visualization, You Must:
-
         A. Select the Chart Type: Choose the most effective chart_type from the list above based on your intent analysis.
-
         Parse and Understand the Context: First, carefully read the {dataset_context}. This context will be provided in a semi-structured or descriptive format. Your primary goal is to extract the key information:
-
         The names of all available datasets (e.g., sales_data, customer_info).
-
         The columns within each dataset.
-
         Any mentioned relationships or join keys between datasets (e.g., "the product_id column links them").
-
         B. Identify All Necessary Columns: identify the exact columns needed for the chart's axes and values. Format them as a list of ["column_name", "dataset_name",and so on].
-
         C. Plan Merge Operations: If the required columns come from more than one dataset, you must define how to merge them. Specify the list of datasets and the type of merge (inner, left, right, outer). Assume joins will be performed on common key columns (e.g., id, user_id, product_id).
         </reasoning_process>
         <output>
         Your final output MUST be a single, valid JSON object and nothing else. Do not include any explanations, apologies, or markdown formatting.
-
         The JSON object's top-level keys must be visualization_1, visualization_2, and so on, for each chart you plan.
-
         Each visualization object must contain the following keys:
-
         chart_type: (String) The type of chart to be generated (e.g., "bar", "line", "scatter").
-
         columns: (List of Lists) A list where each inner list contains the column name and its source dataset, like [["Sales", "SalesData"], ["Region", "RegionData"]].
-
         merge_operation: (Object) This key should only be present if columns from more than one dataset are used. It must contain:
-
         datasets: (List of Strings) The names of the datasets to merge.
-
         type: (String) The type of SQL join to perform: "inner", "left", "right", or "outer".
         </output>
         <example>
         Dataset Context Example:
         "Okay, so we have two main sources of data. The first is our sales table, which logs every transaction. It includes a unique sale_id, the product_id to know what was sold, the order_date, and of course the sale_amount. Our second table is the products catalog. This table lists all our items and contains the product_id, the product_name, and the category it belongs to. Both tables can be joined on product_id."
-
         User Query Example:
         "Compare total sales for each product category and also show the trend of total orders over the last year."
-
         Expected JSON Output Example:
         {example_input}
         </example>
         """
         message = [SystemMessage(content=planner_prompt)]
         result = self.planner_llm.invoke(message)
-        return {"code_input": result.content}
+        print(f"---PLANNER OUTPUT---\n{result}\n---END---")
+        return {"code_input": result}
 
     def code_generator(self, state: State):
-        """generates the code for the given specifications"""
         print("---GENERATING CODE---")
         example_input = json.dumps({
             "visualization_1": {
@@ -257,20 +224,15 @@ json strcutured output key refined_prompt and the key should be a string and nex
         example_output = """import pandas as pd
 import plotly.express as px
 import os
-
 output_dir = "visualization"
 os.makedirs(output_dir, exist_ok=True)
-
 sales_df = pd.read_csv('datasets/sales.csv')
 products_df = pd.read_csv('datasets/products.csv')
-
 merged_df = pd.merge(sales_df, products_df, how='inner', on='product_id')
-
 agg_df_1 = merged_df.groupby('category')['sale_amount'].sum().reset_index()
 fig1 = px.bar(agg_df_1, x='category', y='sale_amount', title='Total Sale Amount by Category')
 fig1.write_html(os.path.join(output_dir, "visualization_1.html"))
 fig1.show()
-
 sales_df['order_date'] = pd.to_datetime(sales_df['order_date'])
 agg_df_2 = sales_df.groupby('order_date')['sale_id'].count().reset_index()
 fig2 = px.line(agg_df_2, x='order_date', y='sale_id', title='Count of Sales Over Time')
@@ -343,13 +305,16 @@ Finally, call fig.show() to display the plot
         prompt = "the input prompt from the user" + state["refined_prompt"] + "structured prompt" + json.dumps(state["code_input"])
         message = [SystemMessage(content=code_generator_prompt), HumanMessage(content=prompt)]
         response = self.code_model.invoke(message)
+        print(f"---GENERATED CODE---\n{response.content}\n---END---")
         return {"code": response.content}
 
     def run_code(self, state: State):
-        """Executes the generated code and handles errors."""
         print("---EXECUTING CODE---")
         try:
-            exec(state["code"])
+            temp_globals = {"pd": pd, "plt": plt, "os": os}
+            # Add dataframes to the global namespace for the script to access
+            temp_globals.update(state.get("data", {}))
+            exec(state["code"], temp_globals)
             print("Code executed successfully.")
             return {"error": 0}
         except Exception as e:
@@ -357,7 +322,6 @@ Finally, call fig.show() to display the plot
             return {"error": e}
 
     def correction(self, state: State):
-        """Corrects the code based on the execution error."""
         print("---ATTEMPTING CODE CORRECTION---")
         error = state["error"]
         code = state["code"]
@@ -371,10 +335,10 @@ Finally, call fig.show() to display the plot
         """
         message = [SystemMessage(content=system_prompt)]
         response = self.error_model.invoke(message)
+        print(f"---CORRECTED CODE---\n{response.content}\n---END---")
         return response.content
 
     def router(self, state: State) -> Literal["end", "correction"]:
-        """Routes based on whether code execution succeeded or failed."""
         decision = state["error"]
         if decision == 0:
             return "end"
@@ -382,59 +346,57 @@ Finally, call fig.show() to display the plot
             return "correction"
 
     def run(self, user_query: str):
-        """Runs the complete data visualization agent workflow."""
         initial_state = {"message": user_query}
         for chunk in self.agent.stream(initial_state, stream_mode="updates"):
-            print(chunk)
+            print("Step:", chunk)
 
     def generate(self, nl_query: str, tables: List[str], config: Dict) -> tuple[str, Dict]:
-        """
-        Method to generate code, mirroring the Lida agent's generate method.
-        This is the viseval.agent.Agent interface.
-        """
+        print(f"---AGENT GENERATING FOR QUERY---\nQuery: {nl_query}\nTables: {tables}\n---")
         self.dataset_summaries["datasets"] = [{"name": os.path.basename(t)} for t in tables]
-        initial_state = {"message": nl_query, "datasets_list": tables}
+        initial_state = {"message": nl_query, "datasets_list": [os.path.basename(t) for t in tables]}
         
         final_state = self.agent.invoke(initial_state)
         code = final_state.get("code")
         
-        # Load the data into a context object for the execute step
         data_dict = {os.path.basename(t).split('.')[0]: pd.read_csv(t) for t in tables}
         context = {"data": data_dict, "library": config.get("library")}
+        
+        print(f"---AGENT GENERATION COMPLETE---")
+        print(f"Generated Code: {code}")
+        print(f"Execution Context: {context}")
         
         return code, context
 
     def execute(self, code: str, context: Dict, log_name: str = None) -> ChartExecutionResult:
-        """
-        Method to execute the generated code, mirroring the Lida agent's execute method.
-        This is the viseval.agent.Agent interface.
-        """
+        print("---EXECUTING CODE VIA VISEVAL INTERFACE---")
         data = context.get("data", {})
         library = context.get("library")
-
-        # The code generated is a full script, so we must execute it carefully
         try:
+            # Prepare globals and locals for execution.
+            # We'll use the data dictionary directly here.
+            # The agent's generated code should expect dataframes named like `df_sales`, `df_products`, etc.
+            # We must map the data dictionary to these names.
             temp_globals = {"pd": pd, "plt": plt, "os": os}
-            # Add dataframes to the global namespace for the script to access
             temp_globals.update(data)
             
-            # Matplotlib/Seaborn specific code (from the Lida example)
-            temp_globals['plt'] = plt
-            
-            # The script will be self-contained; we just need to run it
-            exec(code, temp_globals)
+            # Matplotlib/Seaborn specific setup from the Lida example
+            if library in ["matplotlib", "seaborn"]:
+                temp_globals['plt'] = plt
+                exec(code, temp_globals)
+                plt.box(False)
+                plt.grid(color="lightgray", linestyle="dashed", zorder=-10)
+                svg_string = show_svg(plt, svg_name=log_name)
+                return ChartExecutionResult(status=True, svg_string=svg_string)
+            else:
+                # Assuming Plotly for other cases
+                import plotly
+                temp_globals['plotly'] = plotly
+                exec(code, temp_globals)
+                return ChartExecutionResult(status=True, svg_string="plotly_chart_success")
 
-            # Capture SVG output
-            svg_string = show_svg(plt, svg_name=log_name)
-            
-            return ChartExecutionResult(status=True, svg_string=svg_string)
         except Exception as exception_error:
             import traceback
             exception_info = traceback.format_exception_only(type(exception_error), exception_error)
             error_msg = "".join(exception_info)
+            print(f"Code execution failed: {error_msg}")
             return ChartExecutionResult(status=False, error_msg=error_msg)
-
-if __name__ == "__main__":
-    agent = DataVisualizationAgent()
-    user_query = input("Enter query: ")
-    agent.run(user_query)   

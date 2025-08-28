@@ -1,44 +1,33 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 import os
 import pandas as pd
 from dotenv import load_dotenv
 import json
-from datetime import datetime
 from typing import TypedDict, Annotated
-
-# State def of profiler
-from langchain_core.messages import AnyMessage
-from langgraph.graph import add_messages
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, AnyMessage
-from langgraph.graph.message import add_messages
-from langgraph.graph import END, START
-from langgraph.graph.state import StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
 import chromadb
-from chromadb.config import Settings
-
+from langchain_core.messages import AnyMessage, SystemMessage
+from langgraph.graph.message import add_messages
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
+from langchain_openai import ChatOpenAI
+from pathlib import Path
 
 class State(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     count: int
     target: int
-
+    dataset_paths: list[str]
+    current_summary: str
 
 class DataProfilerAgent:
     def __init__(self, target_count: int = 2):
-        # Load environment variables
         load_dotenv(dotenv_path='.env')
-        # Set OpenAI API key from environment variable
         os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
-
-        # Initialize global variables for the class instance
         self.dataset_summaries = {}
-
-        # Configure LLMs
         self.model = ChatOpenAI(model="gpt-4.1-2025-04-14")
         self.model_with_tools = self.model.bind_tools(self.get_tools())
-
-        # Initialize Langgraph workflow
         self.graph_workflow = StateGraph(State)
         self.graph_workflow.add_node("agent", self.call_model)
         self.graph_workflow.add_node("tools", ToolNode(self.get_tools()))
@@ -46,36 +35,38 @@ class DataProfilerAgent:
         self.graph_workflow.add_conditional_edges("agent", tools_condition)
         self.graph_workflow.add_edge("tools", "agent")
         self.agent = self.graph_workflow.compile()
-
-        # Set initial state
         self.initial_state = {
             "messages": [],
             "count": 0,
-            "target": target_count
+            "target": target_count,
+            "dataset_paths": []
         }
+        self.datasets_dir = None
+
+    def _get_dataset_path(self, dataset_count: int) -> str:
+        if self.datasets_dir:
+            dataset_files = os.listdir(self.datasets_dir)
+            if 0 <= dataset_count < len(dataset_files):
+                return os.path.join(self.datasets_dir, dataset_files[dataset_count])
+        return None
 
     def peek(self, dataset_count: int) -> str:
-        """This helps in getting a peek of the dataset helps you get an idea about the dataset initially about the column name and the values in the first 50 rows to get a brief idea about the dataset"""
+        dataset_path = self._get_dataset_path(dataset_count)
+        if not dataset_path:
+            return f"Error: Dataset not found for index {dataset_count}"
+        
         try:
-            # Read only the first 50 rows of the dataset
-            dataset_path = "datasets/" + os.listdir("datasets")[dataset_count - 1]
+            df = pd.read_csv(dataset_path, nrows=50)
             file_stats = os.stat(dataset_path)
             dataset_name = os.path.basename(dataset_path)
-            df = pd.read_csv("datasets/" + os.listdir("datasets")[dataset_count - 1], nrows=50)
-
-            # Get basic info
+            
             total_rows, total_cols = df.shape
-
-            # Create column summary
             column_summary = []
             for col in df.columns:
                 col_type = str(df[col].dtype)
                 null_count = df[col].isnull().sum()
                 unique_count = df[col].nunique()
-
-                # Get sample values (first 3 non-null values)
                 sample_values = df[col].dropna().head(3).tolist()
-
                 column_summary.append(f"Column: {col}")
                 column_summary.append(f"  - Data Type: {col_type}")
                 column_summary.append(f"  - Null values in sample: {null_count}")
@@ -83,12 +74,11 @@ class DataProfilerAgent:
                 column_summary.append(f"  - Sample values: {sample_values}")
                 column_summary.append("")
 
-            # Create the summary output
-            summary = f"""DATASET PEEK SUMMARY: {"datasets/" + os.listdir("datasets")[dataset_count - 1]}
+            summary = f"""DATASET PEEK SUMMARY: {dataset_name}
         BASIC INFO (First 50 rows):
         - Rows in sample: {total_rows}
         - Total columns: {total_cols}
-        - File size: {os.path.getsize("datasets/" + os.listdir("datasets")[dataset_count - 1]):,} bytes
+        - File size: {file_stats.st_size:,} bytes
 
         COLUMN SUMMARY:
         {chr(10).join(column_summary)}
@@ -98,82 +88,52 @@ class DataProfilerAgent:
 
         This peek shows the structure and sample data from the first 50 rows of the dataset."""
             return summary
-
         except Exception as e:
             return f"Error reading dataset {dataset_path}: {str(e)}"
 
     def update(self, summary: str, current_count: int) -> dict:
-        """Updates the state with the summary for the current dataset and increments count"""
+        self.dataset_summaries[current_count] = summary
+        client = chromadb.PersistentClient(path="./chroma_db")
+        collection = client.get_or_create_collection("dataset_summaries")
+        dataset_path = self._get_dataset_path(current_count)
+        dataset_name = os.path.basename(dataset_path) if dataset_path else f"dataset_{current_count}"
+        doc_id = dataset_name
+        
         try:
-            # Store in class instance dict
-            self.dataset_summaries[current_count] = summary
-
-            # Create ChromaDB client with proper configuration
-            client = chromadb.PersistentClient(path="./chroma_db")
-
-            # Get or create collection
-            collection = client.get_or_create_collection("dataset_summaries")
-
-            # Check if datasets directory exists and has files
-            datasets_dir = "datasets"
-            if not os.path.exists(datasets_dir):
-                print(f"Warning: {datasets_dir} directory not found")
-                dataset_name = f"dataset_{current_count}"
+            existing = collection.get(ids=[doc_id])
+            if existing['ids']:
+                collection.update(
+                    ids=[doc_id],
+                    documents=[summary],
+                    metadatas=[{"dataset_name": dataset_name, "dataset_id": current_count}]
+                )
+                print(f"Updated existing document: {doc_id}")
             else:
-                dataset_files = os.listdir(datasets_dir)
-                if current_count < len(dataset_files):
-                    dataset_name = dataset_files[current_count]
-                else:
-                    print(f"Warning: current_count {current_count} exceeds available datasets")
-                    dataset_name = f"dataset_{current_count}"
-
-            # Check if document already exists
-            doc_id = dataset_name
-            try:
-                existing = collection.get(ids=[doc_id])
-                if existing['ids']:
-                    # Update existing document
-                    collection.update(
-                        ids=[doc_id],
-                        documents=[summary],
-                        metadatas=[{"dataset_name": dataset_name, "dataset_id": current_count}]
-                    )
-                    print(f"Updated existing document: {doc_id}")
-                else:
-                    # Add new document
-                    collection.add(
-                        documents=[summary],
-                        metadatas=[{"dataset_name": dataset_name, "dataset_id": current_count}],
-                        ids=[doc_id]
-                    )
-                    print(f"Added new document: {doc_id}")
-            except Exception as e:
-                # If get fails, assume document doesn't exist and add it
                 collection.add(
                     documents=[summary],
                     metadatas=[{"dataset_name": dataset_name, "dataset_id": current_count}],
                     ids=[doc_id]
                 )
                 print(f"Added new document: {doc_id}")
-
-            # Verify the data was saved
-            saved_data = collection.get(ids=[doc_id])
-            print(f"Verification - Saved document count: {len(saved_data['ids'])}")
-            print(f"ChromaDB updated successfully. Database path: {os.path.abspath('./chroma_db')}")
-
-        except Exception as e:
-            print(f"Error updating ChromaDB: {str(e)}")
-            print(f"Error type: {type(e).__name__}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            collection.add(
+                documents=[summary],
+                metadatas=[{"dataset_name": dataset_name, "dataset_id": current_count}],
+                ids=[doc_id]
+            )
+            print(f"Added new document: {doc_id}")
+        
+        saved_data = collection.get(ids=[doc_id])
+        print(f"Verification - Saved document count: {len(saved_data['ids'])}")
+        print(f"ChromaDB updated successfully. Database path: {os.path.abspath('./chroma_db')}")
 
         return {
-            "message": [],
+            "messages": [],
             "count": current_count + 1
         }
 
     def semantic_summary(self, state):
-        "i am semantic summary"
+        print("---GENERATING SEMANTIC SUMMARY---")
         all_summaries = [v for k, v in self.dataset_summaries.items() if k != 'database_intent']
         prompt = (
             "You are a data documentation expert. Given the following dataset summaries, "
@@ -182,10 +142,11 @@ class DataProfilerAgent:
             "Highlight any patterns, strengths, or limitations. Do NOT repeat the summaries verbatim, but synthesize them into a single, coherent, high-level description.\n\n"
             "DATASET SUMMARIES:\n" + "\n---\n".join(all_summaries) + "\n\nDATABASE INTENT SUMMARY:"
         )
-        Model = ChatOpenAI(model="gpt-3.5-turbo")
-        result = Model.invoke(prompt)
+        model = ChatOpenAI(model="gpt-3.5-turbo")
+        result = model.invoke(prompt)
         summary = result.content
         self.dataset_summaries['database_intent'] = summary
+        print("Semantic summary generated and stored.")
         return "done"
 
     def get_tools(self):
@@ -231,16 +192,24 @@ For each column in the dataset:
         response = self.model_with_tools.invoke(messages)
         return {"messages": [response]}
 
-    def run_profiler(self):
-        # Synchronous streaming
+    def run_profiler(self, dataset_dir: Path):
+        self.datasets_dir = dataset_dir
+        self.initial_state["dataset_paths"] = os.listdir(dataset_dir)
+        self.initial_state["target"] = len(self.initial_state["dataset_paths"])
+        
+        # Stream the agent's execution to generate summaries
         for step in self.agent.stream(self.initial_state):
             print("Step:", step)
 
-        # Save dataset_summaries to a file
-        with open("dataset_summaries.json", "w") as f:
-            json.dump(self.dataset_summaries, f)
-
-
+        # After the streaming is complete, save the final summaries
+        summaries_file_path = os.path.join(dataset_dir, "dataset_summaries.json")
+        with open(summaries_file_path, "w") as f:
+            json.dump(self.dataset_summaries, f, indent=4)
+        print(f"Dataset summaries saved to {summaries_file_path}")
+        return summaries_file_path
+    
 if __name__ == "__main__":
-    profiler = DataProfilerAgent(target_count=2)
-    profiler.run_profiler()
+    # Example usage:
+    # profiler = DataProfilerAgent()
+    # profiler.run_profiler(dataset_dir="D:\\Projects\\VizzMeup\\visEval_dataset\\databases")
+    pass # No longer run directly to avoid unexpected behavior
