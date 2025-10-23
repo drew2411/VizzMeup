@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 
 import dotenv
-from agent import Chat2vis, CoML4VIS, Lida
+# from agent import Chat2vis, CoML4VIS, Lida
 
 from viseval import Dataset, Evaluator
 

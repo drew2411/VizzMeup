@@ -14,7 +14,6 @@ from langchain_openai import ChatOpenAI
 import chromadb
 from langgraph.graph import END, START, StateGraph
 from viseval.agent import Agent, ChartExecutionResult
-from lida.components import preprocess_code, get_globals_dict
 
 # Utility function from the original Lida example
 def show_svg(plt, svg_name: str = None):

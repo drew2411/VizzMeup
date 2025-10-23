@@ -92,6 +92,8 @@ class DataProfilerAgent:
             return f"Error reading dataset {dataset_path}: {str(e)}"
 
     def update(self, summary: str, current_count: int) -> dict:
+        """Updates the state with the summary for the current dataset and stores it in ChromaDB."""
+        # The rest of your function code remains the same
         self.dataset_summaries[current_count] = summary
         client = chromadb.PersistentClient(path="./chroma_db")
         collection = client.get_or_create_collection("dataset_summaries")
@@ -133,6 +135,12 @@ class DataProfilerAgent:
         }
 
     def semantic_summary(self, state):
+        """Generates a high-level semantic summary of all profiled datasets.
+        
+        Args:
+            state (dict): The current state of the LangGraph.
+        """
+
         print("---GENERATING SEMANTIC SUMMARY---")
         all_summaries = [v for k, v in self.dataset_summaries.items() if k != 'database_intent']
         prompt = (
